@@ -1,0 +1,33 @@
+# M3 Risikoregeln. Aenderungen hier -> "version" erhoehen.
+# Die Version geht in jede Bewertung ein (risk_assessments.policy_version) und in den Fingerabdruck,
+# dadurch werden beim naechsten /run alle Treffer mit den neuen Regeln neu bewertet.
+version: v1
+
+# Gewichte in Punkten, Summe = 100. Jeder Faktor liefert einen Wert zwischen 0 und 1.
+weights:
+  severity: 35        # CVSS / 10
+  exploitation: 25    # 1, wenn in CISA KEV; sonst EPSS-Wahrscheinlichkeit
+  criticality: 15     # (Kritikalitaet - 1) / 4
+  exposure: 10        # 1, wenn aus dem Internet erreichbar
+  trust: 10           # Trust-Score aus M2
+  confidence: 5       # Sicherheit des Treffers
+
+# Stufen nach Punkten, von oben nach unten geprueft
+levels:
+  - {level: critical, min_score: 80}
+  - {level: high,     min_score: 60}
+  - {level: medium,   min_score: 40}
+  - {level: low,      min_score: 20}
+  - {level: info,     min_score: 0}
+
+# Mindeststufe: aktiv ausgenutzt (KEV) + aus dem Internet erreichbar + Version sicher betroffen
+floors:
+  kev_exposed_affected: high
+
+# Massnahme und Frist je Stufe (Stunden ab Bewertung). Die Frist ist nie spaeter als die KEV-Frist.
+actions:
+  critical: {action_code: patch_immediately,  deadline_hours: 24}
+  high:     {action_code: patch_urgently,     deadline_hours: 168}
+  medium:   {action_code: patch_scheduled,    deadline_hours: 720}
+  low:      {action_code: patch_next_cycle,   deadline_hours: 2160}
+  info:     {action_code: monitor,            deadline_hours: null}
