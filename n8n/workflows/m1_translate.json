@@ -1,0 +1,49 @@
+{
+  "id": "m1Translate0001",
+  "name": "M1 - Meldungen uebersetzen (alle 2 Minuten)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [ { "field": "minutes", "minutesInterval": 2 } ] }
+      },
+      "id": "c1000000-0000-4000-8000-000000000001",
+      "name": "Zeitplan: alle 2 Minuten",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [ 0, 0 ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://m1:8000/translate",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "X-API-Key", "value": "={{ $env.INTERNAL_API_KEY }}" } ] },
+        "options": { "timeout": 600000 }
+      },
+      "id": "c1000000-0000-4000-8000-000000000002",
+      "name": "M1: ausstehende Meldungen uebersetzen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 240, 0 ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 10000,
+      "notes": "POST /translate. Antwort: done, failed, retry_later und items[] mit den bearbeiteten Meldungen (id, title, title_de, status).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": { "fieldToSplitOut": "items", "options": {} },
+      "id": "c1000000-0000-4000-8000-000000000003",
+      "name": "Ein Eintrag je uebersetzter Meldung",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [ 480, 0 ]
+    }
+  ],
+  "connections": {
+    "Zeitplan: alle 2 Minuten": { "main": [ [ { "node": "M1: ausstehende Meldungen uebersetzen", "type": "main", "index": 0 } ] ] },
+    "M1: ausstehende Meldungen uebersetzen": { "main": [ [ { "node": "Ein Eintrag je uebersetzter Meldung", "type": "main", "index": 0 } ] ] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
