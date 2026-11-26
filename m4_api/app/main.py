@@ -8,11 +8,12 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import audit, config, db, security
@@ -47,29 +48,69 @@ def ensure_admin(conn: psycopg.Connection) -> None:
         log.info("Start-Admin '%s' angelegt", config.ADMIN_USERNAME)
 
 
+# ---------------------------------------------------------------- Bereitschaft
+# Fehlt das Schema m4 (Datenbank-Volume aelter als m4_initial.sql) oder ist die Datenbank nicht erreichbar,
+# startet M4 trotzdem: /health bleibt erreichbar (sonst warten n8n und web endlos und es laufen keine
+# Zeitplaene), die /api-Routen antworten mit 503 und einem Hinweis. Ist das Problem behoben, prueft die
+# naechste Anfrage erneut, ein Neustart ist nicht noetig.
+
+SCHEMA_MISSING = ("Datenbankschema m4 fehlt: die Datenbank wurde vor m4_initial.sql angelegt. "
+                  "Nachladen siehe m4_api/README.md, Abschnitt 'Bestehende Datenbank'.")
+DB_UNREACHABLE = "Datenbank nicht erreichbar"
+
+_state = {"problem": "noch nicht geprueft"}
+_state_lock = threading.Lock()
+
+
+def prepare() -> str | None:
+    """Prueft Schema und legt den Start-Admin an. None = bereit, sonst der Grund."""
+    try:
+        with db.connect() as conn:
+            if conn.execute("SELECT to_regclass('m4.users') AS t").fetchone()["t"] is None:
+                return SCHEMA_MISSING
+            ensure_admin(conn)
+    except psycopg.OperationalError:
+        return DB_UNREACHABLE
+    return None
+
+
+def require_ready() -> None:
+    if _state["problem"] is None:
+        return
+    with _state_lock:
+        if _state["problem"] is not None:
+            _state["problem"] = prepare()
+    if _state["problem"] is not None:
+        raise HTTPException(status_code=503, detail=_state["problem"])
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    if config.JWT_SECRET == config.DEV_JWT_SECRET:
-        log.warning("JWT_SECRET hat den Entwicklungs-Standardwert. Fuer den Betrieb in der .env setzen.")
-    elif len(config.JWT_SECRET.encode()) < 32:
-        log.warning("JWT_SECRET ist kuerzer als 32 Byte und damit zu schwach fuer HS256.")
-    for attempt in range(10):
-        try:
-            with db.connect() as conn:
-                ensure_admin(conn)
+    # Unsichere, ausdruecklich gesetzte Werte -> ConfigError, M4 startet nicht.
+    for warning in config.resolve_secrets():
+        log.warning(warning)
+    for _attempt in range(10):
+        _state["problem"] = prepare()
+        if _state["problem"] != DB_UNREACHABLE:
             break
-        except psycopg.OperationalError:
-            if attempt == 9:
-                raise
-            log.info("Datenbank noch nicht erreichbar, neuer Versuch in 2 s")
-            time.sleep(2)
+        log.info("Datenbank noch nicht erreichbar, neuer Versuch in 2 s")
+        time.sleep(2)
+    if _state["problem"]:
+        log.error("M4 laeuft eingeschraenkt, /api antwortet mit 503: %s", _state["problem"])
     yield
 
 
 app = FastAPI(title="M4 Zentrale API und Benachrichtigung", lifespan=lifespan)
-app.include_router(auth.router)
-app.include_router(users.router)
-app.include_router(sources.router)
+for router in (auth.router, users.router, sources.router):
+    app.include_router(router, dependencies=[Depends(require_ready)])
+
+
+@app.exception_handler(psycopg.errors.UndefinedTable)
+async def schema_missing(request: Request, exc: psycopg.errors.UndefinedTable) -> JSONResponse:
+    # Schema waehrend des Betriebs entfernt: wieder in den eingeschraenkten Zustand wechseln.
+    _state["problem"] = SCHEMA_MISSING
+    log.error("M4: Tabelle fehlt bei %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": SCHEMA_MISSING})
 
 
 @app.exception_handler(Exception)
@@ -80,4 +121,6 @@ async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "module": "m4_api"}
+    """Immer 200, damit n8n und web nicht auf M4 warten. Probleme stehen in status und detail."""
+    problem = _state["problem"]
+    return {"status": "degraded" if problem else "ok", "module": "m4_api", "detail": problem}

@@ -36,6 +36,15 @@ Rollen sind gestuft: `viewer` < `analyst` < `admin`. Eine Route fuer `analyst` e
   Ohne `ADMIN_PASSWORD` steht ein einmaliges Zufallspasswort im Log: `docker compose logs m4 | grep Startpasswort`.
 - Der letzte aktive Admin kann nicht herabgestuft oder deaktiviert werden (409).
 
+**Geheimnisse beim Start**
+
+| Wert | fehlt oder Platzhalter aus dem Repo | gesetzt, aber zu kurz |
+|---|---|---|
+| `JWT_SECRET` (mind. 32 Byte) | Zufallsschluessel fuer diesen Start, Warnung im Log. Anmeldungen gelten nur bis zum Neustart | M4 startet nicht |
+| `ADMIN_PASSWORD` (mind. 10 Zeichen) | Einmaliges Zufallspasswort im Log | M4 startet nicht |
+
+Oeffentlich bekannte Werte (z. B. die alten Platzhalter aus `.env.example`) stehen in `app/config.py` und gelten als nicht gesetzt,
+damit sich niemand mit ihnen ein Admin-Token bauen kann.
 **Audit-Log:** Anmeldungen (auch fehlgeschlagene), Abmeldungen, Passwortwechsel und jede Aenderung an Benutzern
 und Quellen. Bei Aenderungen stehen nur die geaenderten Felder mit altem und neuem Wert drin, nie Passwoerter.
 
@@ -68,6 +77,24 @@ docker compose exec -T postgres psql -U argos -d argos -v ON_ERROR_STOP=1 < m4_a
 ```
 Erwartet: `NOTICE:  M4 smoke test OK`.
 
+### Bestehende Datenbank: m4_initial.sql nachladen
+
+Die Dateien in `db/init/` laufen nur beim allerersten Start auf einem leeren Volume. Wurde die Datenbank vorher
+angelegt, fehlt das Schema `m4`. M4 startet dann trotzdem, damit n8n und die anderen Module weiterlaufen:
+`/health` meldet `"status": "degraded"`, alle `/api`-Routen antworten mit 503 und diesem Hinweis.
+
+Nachladen, ohne andere Daten zu verlieren (im Hauptordner des Repositorys):
+```sh
+docker compose exec -T postgres psql -U argos -d argos -v ON_ERROR_STOP=1 < db/init/m4_initial.sql
+```
+PowerShell:
+```powershell
+Get-Content -Raw db\init\m4_initial.sql | docker compose exec -T postgres psql -U argos -d argos -v ON_ERROR_STOP=1
+```
+Ein Neustart von M4 ist nicht noetig, die naechste Anfrage prueft erneut und legt den Start-Admin an.
+Die Datei laeuft in einer Transaktion: bricht sie ab (z. B. weil Teile des Schemas schon existieren), wird nichts geaendert.
+Alternativ alles neu aufsetzen mit `docker compose down -v` (loescht **alle** Daten).
+
 ## Tests
 
 Im Ordner `m4_api`, Python 3.12:
@@ -78,8 +105,10 @@ M4_TEST_DATABASE_URL=postgresql://argos:argos@localhost:5432/argos python -m pyt
 ```
 Ohne lokales Python 3.12 im Container:
 ```sh
-docker run --rm --network argos_default -v "$PWD:/srv" -w /srv \
+# im Hauptordner des Repositorys (der Test fuer das Nachladen braucht db/init)
+docker run --rm --network argos_default -v "$PWD:/repo" -w /repo/m4_api \
   -e M4_TEST_DATABASE_URL=postgresql://argos:argos@postgres:5432/argos \
   python:3.12-slim sh -c "pip install -q -r requirements-dev.txt && python -m pytest"
 ```
-Der Durchlauf mit DB **leert `m4.users` und `m4.audit_log`**: nur gegen die lokale Entwicklungsdatenbank laufen lassen.
+Der Durchlauf mit DB **leert `m4.users` und `m4.audit_log`** und legt kurz eine Wegwerf-Datenbank `m4_empty_*` an:
+nur gegen die lokale Entwicklungsdatenbank laufen lassen.
